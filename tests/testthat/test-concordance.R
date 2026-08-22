@@ -65,6 +65,20 @@ library(ferx)
 }
 `%||%` <- function(a, b) if (is.null(a)) b else a
 
+# Named sigmas. Measured on ferx 0.3.0, `fit$sigma` is an UNNAMED numeric vector
+# and the names live in a parallel `fit$sigma_names` -- so unlike the omega
+# matrix there is not even a dimname to fall back on, and `fit$sigma[[1]]` is
+# purely positional. It is right today only because the model under test has one
+# sigma; a second endpoint, or a reordering upstream, would silently move the
+# assertion onto a different parameter while still passing. Same defect
+# .omega_diag() exists to prevent, one field over.
+.sigma_named <- function(fit) {
+  sg <- unlist(fit$sigma)
+  nm <- fit$sigma_names %||% names(sg)
+  if (!is.null(nm) && length(nm) == length(sg)) names(sg) <- nm
+  sg
+}
+
 .conc_data <- function(name) {
   system.file(file.path("testdata", name), package = "ferxtranslate")
 }
@@ -690,4 +704,50 @@ test_that("the per-endpoint sigma names bind, so the branch mapping is load-bear
     expect_false(identical(swapped, txt), label = paste(m, "swap changed the text"))
     expect_gt(abs(.pred_of(txt, data)$ofv - .pred_of(swapped, data)$ofv), 1e-6)
   }
+})
+
+# -- FIX on variance parameters (#31) -----------------------------------------
+
+test_that("a FIXed omega, sigma and theta are HELD by the engine, and a free one moves", {
+  # The only tier that can tell "FIX was emitted" from "FIX did anything". A
+  # text assertion alone would pass against an engine that parsed the keyword
+  # and ignored it, and asserting the held value alone is the tautology
+  # CLAUDE.md warns about -- a parameter that never moved and one that is
+  # pinned are the same observation. So fix_variances.ctl starts every fixed
+  # parameter AWAY from the simulation truth, and the free eta beside them is
+  # the control that must move.
+  #
+  #   ETA_KA  .01  free   -> truth; measured to collapse to ~1.5e-5 here
+  #   ETA_CL  .05  FIX    -> truth is .02; a FREE fit of this dataset lands on
+  #                          .0197 (measured), so .05 cannot be reached by
+  #                          estimation and "held" is unambiguous
+  #   SIGMA   .3   FIX    -> emitted as sqrt(.3) on the SD scale
+  #   V       1    FIX    -> theta FIX, the path that already worked
+  ferx_file <- .translate_to_tmp("fix_variances.ctl")
+  data_file <- .conc_data("ode_1cpt_oral_concordance.csv")
+
+  txt <- paste(readLines(ferx_file), collapse = "\n")
+  expect_match(txt, "omega ETA_CL ~ 0.05 FIX", fixed = TRUE)
+  expect_match(txt, "sigma EPS1 ~ 0.547722557505166 FIX (sd)", fixed = TRUE)
+  expect_match(txt, "theta V(1.0, 0.0, 1e15, FIX)", fixed = TRUE)
+  expect_match(txt, "omega ETA_KA ~ 0.01\n", fixed = TRUE)
+
+  fit <- ferx_fit(ferx_file, data_file, method = "focei",
+                  covariance = FALSE, verbose = FALSE)
+
+  om <- .omega_diag(fit)
+  # Held EXACTLY. A tolerance would let a nearly-immobile free parameter pass;
+  # a fixed one is not optimised at all, so it returns its initial bit for bit.
+  expect_equal(om[["ETA_CL"]], 0.05, tolerance = 1e-10)
+  expect_equal(unname(fit$theta[["V"]]), 1.0, tolerance = 1e-10)
+  sg <- .sigma_named(fit)
+  # By NAME, and assert the name is actually there -- indexing a vector that
+  # turned out to be unnamed would silently fall back to a positional guess.
+  expect_true("EPS1" %in% names(sg))
+  expect_equal(unname(sg[["EPS1"]]), sqrt(0.3), tolerance = 1e-10)
+
+  # The control. Without this the test passes against a build in which NOTHING
+  # is estimated -- every assertion above would still hold.
+  expect_gt(abs(om[["ETA_KA"]] / 0.01 - 1), 0.5,
+            label = "free omega ETA_KA moved off its initial")
 })

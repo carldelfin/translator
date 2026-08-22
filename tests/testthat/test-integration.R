@@ -1242,3 +1242,59 @@ test_that("DEFDOSE on compartment 1 with no CMT column reports nothing", {
   expect_equal(.extract_nm_defobs(nm_path("defobs_not_last.ctl"))$defdose, 1L)
   expect_length(grep("DEFDOSE", result$unsupported), 0L)
 })
+
+test_that("FIX survives the whole NONMEM pipeline for thetas, omegas and sigmas", {
+  skip_if_not_installed("nonmem2rx")
+  # End to end on a bundled fixture, which is the only tier that exercises the
+  # nonmem2rx channels as they actually arrive: iniDf$fix for the omegas, and
+  # attr(ui$sigma, "lotriFix") for the sigma -- iniDf carries no sigma row at
+  # all for a NONMEM source, so a Tier-1 test on iniDf alone cannot reach it.
+  result <- suppressWarnings(nm_to_ferx(nm_path("fix_variances.ctl"),
+                                        validate = FALSE))
+  expect_match(result$ferx_text, "theta V(1.0, 0.0, 1e15, FIX)", fixed = TRUE)
+  expect_match(result$ferx_text, "omega ETA_CL ~ 0.05 FIX", fixed = TRUE)
+  expect_match(result$ferx_text, "sigma EPS1 ~ 0.547722557505166 FIX (sd)",
+               fixed = TRUE)
+  # The free eta in the same model is the discriminator: an emitter that
+  # appended FIX unconditionally would satisfy every assertion above.
+  expect_match(result$ferx_text, "omega ETA_KA ~ 0.01\n", fixed = TRUE)
+
+  # A model that merely FIXes parameters uses no unsupported feature. If this
+  # ever gains an entry, something is being reported as a ferx gap that is not.
+  expect_length(result$unsupported, 0L)
+})
+
+test_that("FIX on a $OMEGA BLOCK survives the pipeline, and a free block stays free", {
+  skip_if_not_installed("nonmem2rx")
+  # The block path end to end. Tier 1 covers .extract_omegas() with a synthetic
+  # iniDf and .emit_omega() with a hand-built IR, but neither reaches the other:
+  # nothing else drives a real $OMEGA BLOCK ... FIX from a control stream through
+  # to emitted text, so a regression in how .detect_blocks() orders the lower
+  # triangle against the flag vector would pass every other test.
+  result <- suppressWarnings(nm_to_ferx(nm_path("fix_variances_block.ctl"),
+                                        validate = FALSE))
+  expect_match(result$ferx_text,
+               "block_omega (ETA1, ETA2) = [0.09, 0.01, 0.04] FIX", fixed = TRUE)
+  # The free block is the discriminator -- an emitter appending FIX to every
+  # block satisfies the assertion above on its own.
+  expect_match(result$ferx_text,
+               "block_omega (ETA3, ETA4) = [0.02, 0.005, 0.03]\n", fixed = TRUE)
+  # A wholly fixed block is expressible in ferx, so nothing is unsupported and
+  # the partial-block ERROR must not fire.
+  expect_length(result$unsupported, 0L)
+  expect_length(grep("mixes fixed", result$warnings), 0L)
+})
+
+test_that("FIX on an IOV kappa survives the pipeline, and a free kappa stays free", {
+  skip_if_not_installed("rxode2")
+  # Kappas are reachable only from an nlmixr2 source: nonmem2rx reads NONMEM's
+  # ETA-coded IOV as ordinary IIV, so no control stream produces a
+  # `condition != "id"` row. This is the only end-to-end cover for kappa FIX.
+  fn     <- source(r2_path("fix_kappa_nlmixr2.R"))$value
+  result <- suppressWarnings(nlmixr2_to_ferx(fn))
+  expect_match(result$ferx_text, "kappa IOV_CL ~ 0.05 FIX", fixed = TRUE)
+  expect_match(result$ferx_text, "kappa IOV_V ~ 0.03\n",    fixed = TRUE)
+  # Reading attr(ui$omega, "lotriFix") instead of iniDf$fix would make BOTH
+  # kappas free -- that attribute is NULL on any model carrying IOV.
+  expect_match(result$ferx_text, "iov_column = occ", fixed = TRUE)
+})
