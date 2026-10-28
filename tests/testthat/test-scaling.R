@@ -117,3 +117,81 @@ test_that("an S<n> expression that cannot be placed is reported whole and loudly
                           fixed = TRUE)), label = src)
   }
 })
+
+# S<n> on a solved system (issue #44). The pk macros already return A/v, so only
+# what S<n> carries beyond the volume belongs in [scaling]. Before, the solved
+# path never read S<n> at all.
+.solved_ctl <- function(s_lines, adv = "ADVAN1 TRANS2", pk_extra = character(),
+                        ka = FALSE) {
+  ctl <- file.path(tmp_ctl_dir(), "s.ctl")
+  writeLines(c(
+    "$PROBLEM solved scale", "$INPUT ID TIME DV AMT EVID MDV CMT", "$DATA d.csv IGNORE=@",
+    paste("$SUBROUTINES", adv),
+    "$PK", if (ka) "  KA = THETA(3)", "  CL = THETA(1)*EXP(ETA(1))", "  V  = THETA(2)",
+    pk_extra, s_lines,
+    "$ERROR", "  Y = F*(1+EPS(1))",
+    "$THETA", "  (0,3)", "  (0,30)", if (ka) "  (0,1)",
+    "$OMEGA 0.09", "$SIGMA 0.01", "$EST METHOD=1 INTER"), ctl)
+  ctl
+}
+
+.solved_run <- function(...) suppressWarnings(suppressMessages(
+  nm_to_ferx(.solved_ctl(...), validate = FALSE)))
+
+test_that("S<n> on a solved system emits only what is left after the volume", {
+  skip_if_not_installed("nonmem2rx")
+  blk <- function(s, ...) .scaling_block(.solved_run(s, ...)$ferx_text)
+  # The volume divides out of these.
+  expect_equal(blk("  S1 = V/1000"), "  obs_scale = 0.001")
+  expect_equal(blk("  S1 = 1000*V"), "  obs_scale = 1000.0")
+  expect_equal(blk("  S1 = V*MW", pk_extra = "  MW = 500"), "  obs_scale = MW")
+  expect_equal(blk("  S1 = MW*V", pk_extra = "  MW = 500"), "  obs_scale = MW")
+  expect_equal(blk("  S1 = V/MW", pk_extra = "  MW = 500"), "  obs_scale = 1/MW")
+  # The shape every bundled model has: nothing is left, so nothing is emitted.
+  expect_equal(blk("  S1 = V"), character())
+  # The volume does not divide out: the ratio is emitted as written.
+  expect_equal(blk("  S1 = 1000"), "  obs_scale = 1000/V")
+  expect_equal(blk("  S1 = V + 1"), "  obs_scale = (V + 1)/V")
+
+  r <- .solved_run("  S1 = V/1000")
+  expect_true(any(grepl("S1 = V/1000 detected on a solved system", r$warnings,
+                        fixed = TRUE)))
+  expect_length(r$unsupported, 0L)
+})
+
+test_that("S<n> on a solved system is read for the central compartment only", {
+  skip_if_not_installed("nonmem2rx")
+  # Behind a depot the observed compartment is 2.
+  expect_equal(.scaling_block(.solved_run("  S2 = V/1000", adv = "ADVAN2 TRANS2",
+                                          ka = TRUE)$ferx_text),
+               "  obs_scale = 0.001")
+  # S1 scales the depot, which is not observed: no scaling, and it says so.
+  r <- .solved_run("  S1 = V/1000", adv = "ADVAN2 TRANS2", ka = TRUE)
+  expect_equal(.scaling_block(r$ferx_text), character())
+  expect_true(any(startsWith(r$warnings, "WARN") &
+                  grepl("but not for the observed compartment 2", r$warnings,
+                        fixed = TRUE)))
+})
+
+test_that("an S<n> on a solved system that cannot be placed is reported whole", {
+  skip_if_not_installed("nonmem2rx")
+  r <- .solved_run("  S1 = V*WT/70")
+  expect_equal(.scaling_block(r$ferx_text), character())
+  expect_true(any(startsWith(r$warnings, "ERROR") &
+                  grepl("S1 = V*WT/70 for the observed", r$warnings, fixed = TRUE)))
+  expect_true(any(grepl("not resolvable: V*WT/70", r$unsupported, fixed = TRUE)))
+})
+
+test_that(".residual_scale() divides the volume out of a scale", {
+  r <- .residual_scale
+  expect_null(r("V", "V"))
+  expect_identical(r("V/1000", "V"), 0.001)
+  expect_identical(r("V * 1000", "V"), 1000)
+  expect_equal(r("V * MW", "V"), "MW")
+  expect_equal(r("MW * V", "V"), "MW")
+  expect_equal(r("(V * MW)/2", "V"), "0.5 * MW")
+  expect_equal(r(1000, "V"), "1000/V")
+  expect_equal(r("MW", "V"), "MW/V")
+  # The volume in a denominator is not cancelled by dividing again.
+  expect_equal(r("MW/V", "V"), "MW/(V * V)")
+})

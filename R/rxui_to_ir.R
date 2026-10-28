@@ -14,9 +14,10 @@
 #'   falls back to inference.
 #' @param scaling_hint Named list mapping compartment number (as a character
 #'   string) to the right-hand side of the NONMEM `Sn=` statement as written
-#'   (e.g. `"V*MW"`), as returned by `.extract_nm_scaling()`. Used to emit a `[scaling]` block for ODE models
-#'   where the observed compartment is scaled (e.g. `S2=V`). The default empty
-#'   list disables scaling translation.
+#'   (e.g. `"V*MW"`), as returned by `.extract_nm_scaling()`. Used to emit a `[scaling]` block where
+#'   the observed compartment is scaled (e.g. `S2=V`). For a solved (`linCmt`)
+#'   system the pk macro's own volume is divided out first, so only the
+#'   remainder is emitted. The default empty list disables scaling translation.
 #' @param has_cmt_col `TRUE`, `FALSE` or `NA` -- whether `$INPUT` declares a
 #'   `CMT` data item NONMEM will read, as returned by `.nm_input_has_cmt()`.
 #'   `FALSE` together with a `$MODEL` DEFDOSE compartment that is not the one
@@ -964,6 +965,42 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
     pk_out <- .infer_pk_macro(expr_out$indiv_params)
     warn   <- c(warn, pk_out$warnings)
     unsp   <- c(unsp, pk_out$unsupported)
+    if (!is.na(pk_out$pk_call) && length(scaling_hint) > 0L) {
+      # The observed compartment of a solved system is the central one: 2 behind
+      # a depot (ADVAN2/4/12), 1 otherwise. The pk macro already returns A/v, so
+      # only what S<n> carries beyond the volume goes into obs_scale (#44).
+      central <- if (grepl("oral", pk_out$pk_call, fixed = TRUE)) "2" else "1"
+      svar    <- scaling_hint[[central]]
+      vol     <- pk_out$pk_args[["v"]]
+      if (is.null(vol)) vol <- pk_out$pk_args[["v1"]]
+      if (!is.null(svar)) {
+        matched <- .resolve_scale_expr(svar, theta_names, .ip_names(expr_out$indiv_params))
+        if (is.null(matched)) {
+          warn <- c(warn, paste0(
+            "ERROR | $PK sets S", central, " = ", svar, " for the observed ",
+            "compartment, but '", svar, "' is not an arithmetic expression of ",
+            "thetas, individual parameters and numbers in the translated model, so ",
+            "no [scaling] block was emitted. The prediction will be off by whatever ",
+            "S", central, " carries beyond the volume."))
+          unsp <- c(unsp, paste0("observation scaling variable not resolvable: ", svar))
+        } else {
+          residual <- if (is.null(vol)) matched else .residual_scale(matched, vol)
+          if (!is.null(residual)) {
+            scaling <- list(obs_scale = residual)
+            warn <- c(warn, paste0(
+              "INFO  | S", central, " = ", svar, " detected on a solved system -- the ",
+              "pk macro already divides by ", vol, ", so [scaling] obs_scale = ",
+              residual, " is emitted."))
+          }
+        }
+      } else {
+        warn <- c(warn, paste0(
+          "WARN  | $PK declares scaling for compartment(s) ",
+          paste(names(scaling_hint), collapse = ", "), " but not for the observed ",
+          "compartment ", central, ", so no [scaling] block was emitted. Verify ",
+          "that the observation is already on the data's scale."))
+      }
+    }
     if (is.na(pk_out$pk_call)) {
       structural <- list()
     } else {
@@ -1445,6 +1482,41 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
     return(if (is.finite(v) && v > 0) v else NULL)
   }
   .expr_text(out)
+}
+
+# What is left of an `S<n>` once a solved system's volume has been divided out.
+# The pk macros already return A/v, so `obs_scale` must be S/v, not S. `scale` is
+# a number or the text from .resolve_scale_expr(); `vol` is the individual
+# parameter passed to the macro as its volume. The scale is flattened into its
+# multiplicative factors so a volume that appears as one cancels exactly
+# (`V/1000` with volume V leaves 0.001), and any other shape is divided out
+# symbolically. Returns NULL when nothing is left to apply, a number, or text.
+.residual_scale <- function(scale, vol) {
+  e <- if (is.numeric(scale)) scale else str2lang(scale)
+  flat <- function(x, inv = FALSE) {
+    if (is.call(x) && is.symbol(x[[1L]]) && length(x) == 3L &&
+        as.character(x[[1L]]) %in% c("*", "/"))
+      return(c(flat(x[[2L]], inv),
+               flat(x[[3L]], if (identical(as.character(x[[1L]]), "/")) !inv else inv)))
+    if (is.call(x) && identical(x[[1L]], as.name("(")))
+      return(flat(x[[2L]], inv))
+    list(list(x = x, inv = inv))
+  }
+  terms <- flat(e)
+  vol_sym <- as.name(vol)
+  hit <- which(vapply(terms, function(t) !t$inv && identical(t$x, vol_sym), NA))
+  if (length(hit) > 0L) terms <- terms[-hit[1L]]
+  else terms <- c(terms, list(list(x = vol_sym, inv = TRUE)))
+  is_num <- vapply(terms, function(t) is.numeric(t$x), NA)
+  k <- 1
+  for (t in terms[is_num]) k <- if (t$inv) k / t$x else k * t$x
+  prod_of <- function(ts) Reduce(function(a, b) call("*", a, b), lapply(ts, `[[`, "x"))
+  num <- prod_of(Filter(function(t) !t$inv, terms[!is_num]))
+  den <- prod_of(Filter(function(t) t$inv, terms[!is_num]))
+  if (is.null(num) && is.null(den)) return(if (isTRUE(all.equal(k, 1))) NULL else k)
+  if (!isTRUE(all.equal(k, 1))) num <- if (is.null(num)) k else call("*", k, num)
+  if (is.null(num)) num <- 1
+  .expr_text(if (is.null(den)) num else call("/", num, den))
 }
 
 .strip_prefix <- function(nm) sub("^[te][.]", "", nm)

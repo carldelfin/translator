@@ -786,3 +786,29 @@ test_that("an S<n> that is an expression scales the prediction by all of it", {
   expect_match(r$txt, "obs_scale = V/1000", fixed = TRUE)
   expect_equal(r$pred, conc * 1000, tolerance = 1e-4)
 })
+
+test_that("an S<n> on a solved system scales the prediction by what the volume leaves", {
+  data <- .conc_data("scale_expr_concordance.csv")
+  expect_true(nzchar(data))
+  d     <- utils::read.csv(data)
+  obs_t <- d$TIME[d$EVID == 0L]
+  conc  <- 100 / 30 * exp(-3 / 30 * obs_t)
+
+  pred_of_model <- function(model) {
+    txt <- .eval_only(suppressWarnings(nm_to_ferx(
+      system.file(file.path("testmodels/nonmem", model),
+                  package = "ferxtranslate")))$ferx_text)
+    list(txt = txt, pred = .pred_of(txt, data)$pred)
+  }
+
+  # F = A(1)/S1 with S1 = V/1000: 1000 times the concentration. The data are
+  # simulated from the closed form, not from our own output, so a dropped S1
+  # cannot cancel on both sides.
+  r <- pred_of_model("scale_quot_solved.ctl")
+  expect_match(r$txt, "obs_scale = 0.001", fixed = TRUE)
+  expect_equal(r$pred, conc * 1000, tolerance = 1e-4)
+  # S1 = V*MW with MW = 500.
+  r <- pred_of_model("scale_prod_solved.ctl")
+  expect_match(r$txt, "obs_scale = MW", fixed = TRUE)
+  expect_equal(r$pred, conc / 500, tolerance = 1e-4)
+})
