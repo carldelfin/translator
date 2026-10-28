@@ -12,10 +12,10 @@ theta_row <- function(name, est, lower = 0, upper = Inf, fix = FALSE) {
              fix = fix, err = NA_character_, condition = NA_character_,
              stringsAsFactors = FALSE)
 }
-eta_row <- function(name, est, neta1, neta2 = neta1, condition = "id") {
+eta_row <- function(name, est, neta1, neta2 = neta1, condition = "id", fix = FALSE) {
   data.frame(ntheta = NA_integer_, neta1 = neta1, neta2 = neta2,
              name = name, lower = -Inf, est = est, upper = Inf,
-             fix = FALSE, err = NA_character_, condition = condition,
+             fix = fix, err = NA_character_, condition = condition,
              stringsAsFactors = FALSE)
 }
 sigma_row <- function(name, est, err = "prop") {
@@ -128,14 +128,44 @@ test_that("extracts IOV kappa from non-id condition", {
   expect_equal(out$iov_column, "OCC")
 })
 
-test_that("block IOV emits WARN", {
+test_that("a block IOV becomes a kappa block, not a warning", {
   ini <- rbind(
     eta_row("kappa.cl", 0.04, neta1 = 1L, neta2 = 1L, condition = "OCC"),
     eta_row("kappa.v",  0.02, neta1 = 2L, neta2 = 1L, condition = "OCC"),
     eta_row("kappa.v",  0.02, neta1 = 2L, neta2 = 2L, condition = "OCC")
   )
   out <- .extract_kappas(ini)
-  expect_match(out$warnings[1], "WARN")
+  expect_length(out$warnings, 0L)
+  expect_length(out$unsupported, 0L)
+  expect_length(out$kappa_blocks, 1L)
+  expect_equal(out$kappa_blocks[[1]]$cov, matrix(c(0.04, 0.02, 0.02, 0.02), 2, 2))
+  expect_equal(vapply(out$kappas, function(k) k$block, 1L), c(1L, 1L))
+  expect_equal(vapply(out$kappas, function(k) k$block_idx, 1L), 1:2)
+})
+
+test_that("an IOV block is fixed as a whole, and a partial FIX is an ERROR", {
+  rows <- function(fix) rbind(
+    eta_row("kappa.cl", 0.04, neta1 = 1L, neta2 = 1L, condition = "OCC", fix = fix[1]),
+    eta_row("kappa.v",  0.01, neta1 = 2L, neta2 = 1L, condition = "OCC", fix = fix[2]),
+    eta_row("kappa.v",  0.02, neta1 = 2L, neta2 = 2L, condition = "OCC", fix = fix[3]))
+  expect_true(.extract_kappas(rows(c(TRUE, TRUE, TRUE)))$kappa_blocks[[1]]$fixed)
+  expect_false(.extract_kappas(rows(c(FALSE, FALSE, FALSE)))$kappa_blocks[[1]]$fixed)
+  part <- .extract_kappas(rows(c(TRUE, FALSE, FALSE)))
+  expect_false(part$kappa_blocks[[1]]$fixed)
+  expect_false(any(vapply(part$kappas, function(k) k$fixed, TRUE)))
+  expect_match(part$warnings, "^ERROR \\| .*mixes fixed")
+  expect_length(part$unsupported, 1L)
+})
+
+test_that("a diagonal IOV and an independent kappa stay plain beside a block", {
+  ini <- rbind(
+    eta_row("kappa.cl", 0.04, neta1 = 1L, neta2 = 1L, condition = "OCC"),
+    eta_row("kappa.v",  0.01, neta1 = 2L, neta2 = 1L, condition = "OCC"),
+    eta_row("kappa.v",  0.02, neta1 = 2L, neta2 = 2L, condition = "OCC"),
+    eta_row("kappa.ka", 0.09, neta1 = 3L, neta2 = 3L, condition = "OCC"))
+  out <- .extract_kappas(ini)
+  expect_length(out$kappa_blocks, 1L)
+  expect_null(out$kappas[[3]]$block)
 })
 
 test_that("empty IOV gives empty kappas", {

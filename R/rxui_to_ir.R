@@ -58,6 +58,7 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
   unsp      <- c(unsp, omega_out$unsupported)
   kappa_out <- .extract_kappas(ini)
   warn      <- c(warn, kappa_out$warnings)
+  unsp      <- c(unsp, kappa_out$unsupported)
 
   sigma_out <- .extract_sigmas(ini, tryCatch(ui$sigma, error = function(e) NULL))
   warn      <- c(warn, sigma_out$warnings)
@@ -1369,6 +1370,7 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
     thetas        = theta_out$thetas,
     omegas        = omega_out$omegas,
     kappas        = kappa_out$kappas,
+    kappa_blocks  = kappa_out$kappa_blocks,
     sigmas        = .order_sigmas_for_error(sigma_out$sigmas,
                                             expr_out$error_model),
     sigma_blocks  = sigma_out$sigma_blocks,
@@ -2538,13 +2540,13 @@ bound_name <- function(entries, raw) {
 .extract_kappas <- function(ini) {
   iov  <- ini[!is.na(ini$neta1) & ini$condition != "id", , drop = FALSE]
   warn <- character()
-  if (nrow(iov) == 0) return(list(kappas = list(), iov_column = NULL, warnings = warn))
+  unsp <- character()
+  none <- list(kappas = list(), kappa_blocks = list(), iov_column = NULL,
+               warnings = warn, unsupported = unsp)
+  if (nrow(iov) == 0) return(none)
 
   diag <- iov[iov$neta1 == iov$neta2, , drop = FALSE]
   off  <- iov[iov$neta1 != iov$neta2, , drop = FALSE]
-
-  if (nrow(off) > 0)
-    warn <- c(warn, "WARN  | IOV block omega detected -- only diagonal kappas emitted")
 
   iov_col <- unique(iov$condition)
   if (length(iov_col) > 1)
@@ -2561,7 +2563,53 @@ bound_name <- function(entries, raw) {
     list(name = .norm(.strip_prefix(diag$name[i])), raw = diag$name[i],
          value = diag$est[i], fixed = .ini_fixed(diag, i))
   )
-  list(kappas = kappas, iov_column = iov_col, warnings = warn)
+
+  # Correlated IOV: kappas joined by a non-zero off-diagonal are held as a
+  # `block_kappa`, on the variance scale like the omega block. The per-kappa
+  # entries keep their own diagonal value and point at the block, so name
+  # uniquification and declared-name checks see every kappa as before.
+  blocks <- list()
+  if (nrow(off) > 0) {
+    groups <- unname(.detect_blocks(off))
+    for (k in seq_along(groups)) {
+      bg <- groups[[k]]
+      lt <- iov[iov$neta1 %in% bg & iov$neta2 %in% bg, , drop = FALSE]
+      lt <- lt[order(lt$neta1, lt$neta2), ]
+      member <- vapply(bg, function(e)
+        which(diag$neta1 == e)[1], 1L)
+      nms <- vapply(member, function(m) kappas[[m]]$name, "")
+      # One flag for the whole declaration: ferx fixes a block_kappa all or
+      # nothing, as it does a block_omega. A mixed block cannot be written, so
+      # it is emitted free and loudly; see .extract_omegas() for why this arm is
+      # only reachable from a hand-built iniDf.
+      fx <- vapply(seq_len(nrow(lt)), function(i) .ini_fixed(lt, i), TRUE)
+      mixed <- any(fx) && !all(fx)
+      if (mixed) {
+        warn <- c(warn, paste0(
+          "ERROR | IOV block (", paste(nms, collapse = ", "), ") mixes fixed ",
+          "and estimated elements. ferx flags a block_kappa all or nothing, so ",
+          "the block is emitted WITHOUT FIX and the elements the source held ",
+          "will be estimated."))
+        unsp <- c(unsp, paste0(
+          "partially fixed IOV block (", paste(nms, collapse = ", "),
+          ") -- ferx fixes a block_kappa all or nothing"))
+      }
+      n   <- length(bg)
+      cov <- matrix(0, n, n)
+      for (i in seq_len(nrow(lt))) {
+        r <- match(lt$neta1[i], bg); cc <- match(lt$neta2[i], bg)
+        cov[r, cc] <- cov[cc, r] <- lt$est[i]
+      }
+      blocks[[k]] <- list(id = k, cov = cov, fixed = !mixed && all(fx))
+      for (j in seq_len(n)) {
+        kappas[[member[j]]]$block     <- k
+        kappas[[member[j]]]$block_idx <- j
+        if (mixed) kappas[[member[j]]]$fixed <- FALSE
+      }
+    }
+  }
+  list(kappas = kappas, kappa_blocks = blocks, iov_column = iov_col,
+       warnings = warn, unsupported = unsp)
 }
 
 # Detect etas that look like inter-occasion variability (IOV) but landed in the

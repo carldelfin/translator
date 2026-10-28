@@ -23,7 +23,8 @@ new_ferx_ir(
   warnings = character(),
   unsupported = character(),
   state_renames = character(),
-  sigma_blocks = list()
+  sigma_blocks = list(),
+  kappa_blocks = list()
 )
 }
 \arguments{
@@ -46,7 +47,9 @@ that belongs to a block that is not.}
 
 \item{kappas}{List of IOV kappa entries. Each element is a list with
 \code{name} (character), \code{value} (numeric), and optionally \code{fixed} (logical
-scalar).}
+scalar), and optionally \code{block} and \code{block_idx}, which make the entry a
+member of the \code{kappa_blocks} element with that \code{id} and give its row in
+that element's matrix.}
 
 \item{sigmas}{List of sigma entries. Each element is a list with \code{name}
 (character), \code{value} (numeric), \code{scale} (\code{"sd"} or \code{"var"}), and
@@ -130,6 +133,10 @@ from. Rendered as \verb{# renamed:} comments by \code{\link[=emit_ferx]{emit_fer
 \code{block_idx} order) and \code{fixed} (logical scalar). Emitted as one
 \code{block_sigma} at the position of the first member; the members' own
 \code{sigmas} entries are not emitted separately.}
+
+\item{kappa_blocks}{List of correlated IOV blocks, in the same shape as
+\code{sigma_blocks}. Emitted as one \code{block_kappa} at the position of the first
+member.}
 }
 \value{
 A \code{ferx_ir} list.
