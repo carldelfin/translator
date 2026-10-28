@@ -144,3 +144,105 @@ test_that("a translatable model is unaffected", {
   expect_length(grep("unparseable", res$unsupported), 0L)
   expect_match(res$ferx_text, "[individual_parameters]", fixed = TRUE)
 })
+
+# -- Tier 1: names rxode2 rejects ----------------------------------------------
+
+.reserved_stream <- c(
+  "$PROBLEM reserved name in DES",
+  "$INPUT ID TIME AMT DV",
+  "$DATA d.csv IGNORE=@",
+  "$SUBROUTINE ADVAN13 TOL=6",
+  "$MODEL COMP=(DEPOT) COMP=(CENT)",
+  "$PK",
+  "  CL = THETA(1)*EXP(ETA(1))",
+  "  V  = THETA(2)",
+  "  KA = THETA(3)",
+  "  S2 = V",
+  "$DES",
+  "  DF = CL/V",
+  "  DADT(1) = -KA*A(1)",
+  "  DADT(2) = KA*A(1) - DF*A(2)",
+  "$ERROR",
+  "  IPRED = F",
+  "  Y = IPRED*(1+EPS(1))",
+  "$THETA (0,3) (0,30) (0,1)",
+  "$OMEGA 0.04",
+  "$SIGMA 0.02",
+  "$ESTIMATION METHOD=1 MAXEVAL=99"
+)
+.with_name <- function(old, new) gsub(old, new, .reserved_stream, fixed = TRUE)
+
+test_that(".nm_assigned_names reads assignments, not comparisons, comments or DADT", {
+  l <- c("$PK", "  IF (SEX.EQ.1) DF = 2 ; X = 5", "  A1 = 1", "  IF (A1 .GE. 1) THEN",
+         "  B2 = 3", "  ENDIF", "$DES", "  DADT(1) = -K*A(1)", "  C = A1 == 1",
+         "$THETA (0,1)", "  NOTCODE = 4")
+  expect_setequal(.nm_assigned_names(l), c("DF", "A1", "B2", "C"))
+})
+
+test_that("only the names rxode2 itself rejects are renamed", {
+  skip_if_not_installed("rxode2")
+  expect_equal(.nm_reserved_renames(.gap_ctl("df.ctl", .reserved_stream)),
+               c(DF = "DF_VAR"))
+  # the control from the issue: same stream, a name rxode2 accepts
+  expect_equal(.nm_reserved_renames(.gap_ctl("ke.ctl", .with_name("DF", "KE"))),
+               character())
+})
+
+test_that("the rename touches code records only, whole words only, and no comment", {
+  l <- c("$INPUT ID TIME DF", "$PK", "  DF = 1 ; DF stays in a comment", "  DFX = DF + ADF",
+         "$DES", "  DADT(1) = -DF*A(1)", "$TABLE ID DF")
+  out <- .nm_rename_identifiers(l, c(DF = "DF_VAR"))
+  expect_identical(out[c(1, 7)], l[c(1, 7)])
+  expect_equal(out[3], "  DF_VAR = 1 ; DF stays in a comment")
+  expect_equal(out[4], "  DFX = DF_VAR + ADF")
+  expect_equal(out[6], "  DADT(1) = -DF_VAR*A(1)")
+})
+
+test_that("a stream with nothing to rename is returned byte for byte", {
+  l <- .with_name("DF", "KE")
+  expect_identical(.nm_rename_identifiers(l, character()), l)
+})
+
+test_that("the new name does not collide with one already in the stream", {
+  skip_if_not_installed("rxode2")
+  p <- .gap_ctl("c.ctl", sub("  IPRED = F", "  DF_VAR = 1\n  IPRED = F",
+                              .reserved_stream, fixed = TRUE))
+  expect_equal(unname(.nm_reserved_renames(p)), "DF_VARX")
+})
+
+# -- Tier 2: through nm_to_ferx() -----------------------------------------------
+
+test_that("a $DES intermediate named DF translates, renamed, with an INFO", {
+  skip_if_not_installed("nonmem2rx")
+  skip_if_not_installed("rxode2")
+  res <- suppressMessages(suppressWarnings(
+    nm_to_ferx(.gap_ctl("df.ctl", .reserved_stream), validate = FALSE)))
+  expect_match(res$ferx_text, "DF_VAR = CL/V", fixed = TRUE)
+  expect_match(res$ferx_text, "- DF_VAR * CENT", fixed = TRUE)
+  expect_false(grepl("\\bDF\\b", gsub("#[^\n]*", "", res$ferx_text)))
+  expect_equal(sum(grepl("^INFO.*DF was renamed to DF_VAR", res$warnings)), 1L)
+  expect_length(res$unsupported, 0L)
+})
+
+test_that("the renamed model is accepted by the engine", {
+  skip_if_not_installed("nonmem2rx")
+  skip_if_not_installed("rxode2")
+  skip_if_not_installed("ferx")
+  res <- suppressMessages(suppressWarnings(
+    nm_to_ferx(.gap_ctl("df.ctl", .reserved_stream), validate = FALSE)))
+  tmp <- tempfile(fileext = ".ferx")
+  writeLines(res$ferx_text, tmp)
+  on.exit(unlink(tmp))
+  out <- NULL
+  utils::capture.output(out <- ferx::ferx_model_validate(tmp))
+  expect_true(out$ok)
+})
+
+test_that("the control (KE) is not renamed and says nothing about it", {
+  skip_if_not_installed("nonmem2rx")
+  skip_if_not_installed("rxode2")
+  res <- suppressMessages(suppressWarnings(
+    nm_to_ferx(.gap_ctl("ke.ctl", .with_name("DF", "KE")), validate = FALSE)))
+  expect_match(res$ferx_text, "KE = CL/V", fixed = TRUE)
+  expect_length(grep("renamed", res$warnings), 0L)
+})

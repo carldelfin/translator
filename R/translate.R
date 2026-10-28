@@ -70,9 +70,14 @@ to_ferx <- function(source,
 
   src_label <- if (is.character(source)) source else "<model function>"
   gap <- NULL
+  # Names rxode2 rejects (`DF`, say) are renamed in a copy of the stream; every
+  # other reader below still gets the original.
+  renames  <- if (format == "nonmem" && is.character(source)) .nm_reserved_renames(source)
+              else character()
+  parse_src <- if (length(renames) > 0L) .nm_renamed_copy(source, renames) else source
   rxui <- tryCatch(
     switch(format,
-      nonmem  = nonmem2rx::nonmem2rx(source),
+      nonmem  = nonmem2rx::nonmem2rx(parse_src),
       nlmixr2 = rxode2::rxode2(source),
       monolix = monolix2rx::monolix2rx(source)
     ),
@@ -111,6 +116,13 @@ to_ferx <- function(source,
   ir <- rxui_to_ir(rxui, source_format = format, source_file = src_file,
                    scaling_hint = scaling_hint, obs_hint = obs_hint,
                    has_cmt_col = has_cmt_col)
+  if (length(renames) > 0L) {
+    note <- paste0("INFO  | ", names(renames), " was renamed to ", renames,
+                   ": rxode2, which nonmem2rx translates through, rejects ",
+                   "that name. The model is otherwise unchanged.")
+    .emit_warnings(note)
+    ir$warnings <- c(note, ir$warnings)
+  }
   text <- emit_ferx(ir)
 
   val <- if (isTRUE(validate)) {

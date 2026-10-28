@@ -60,3 +60,111 @@
   new_ferx_translate_result(
     paste0("# No .ferx was produced: ", feature, " could not be parsed.\n"), ir)
 }
+
+# -- identifiers rxode2 rejects ------------------------------------------------
+
+# NONMEM is case-insensitive, and nonmem2rx lower-cases variables on the way in,
+# so `DF = CL/V` reaches rxode2 as `df <- cl/v`, which its parser rejects (it is
+# a distribution function there). The name is immaterial to the model, so it is
+# renamed in the stream nonmem2rx reads rather than reported as a gap.
+#
+# The rejected set is asked of rxode2 itself rather than listed here: each name a
+# record assigns is parsed as `NAME <- k*2` in a throwaway model, which takes
+# milliseconds because it is a parse and not a compile.
+
+.nm_code_record <- function(rec)
+  grepl("^(PK|PRE[A-Z]*|ERR[A-Z]*|DES[A-Z]*|AES[A-Z]*)$", rec, ignore.case = TRUE)
+
+# Per line: is it inside a record that holds code? Header lines count, since
+# `$PK CL = 1` is legal.
+.nm_code_lines <- function(lines) {
+  in_code <- FALSE
+  vapply(lines, function(l) {
+    m <- regmatches(l, regexec("^\\s*\\$([A-Za-z]+)", l))[[1]]
+    if (length(m) == 2L) in_code <<- .nm_code_record(m[2])
+    in_code
+  }, NA, USE.NAMES = FALSE)
+}
+
+# Names assigned in code records (upper-cased, unique), comments stripped.
+.nm_assigned_names <- function(lines) {
+  code <- sub(";.*$", "", lines[.nm_code_lines(lines)])
+  m <- regmatches(code, gregexpr(
+    "(?<![[:alnum:]_.$])[A-Za-z_][A-Za-z0-9_]*(?=\\s*=(?!=))", code, perl = TRUE))
+  unique(toupper(unlist(m)))
+}
+
+# Does rxode2 accept `name` as an ordinary variable? Asked of the lower-cased
+# name, because that is what nonmem2rx hands it (`DF` passes, `df` does not).
+# NA when rxode2 cannot be asked, which callers must treat as "no rename".
+.rx_accepts_name <- function(name) {
+  if (!requireNamespace("rxode2", quietly = TRUE)) return(NA)
+  name <- tolower(name)
+  txt <- paste0("d/dt(rxprobe_s) <- -rxprobe_k*rxprobe_s\n",
+                name, " <- rxprobe_k*2\n",
+                "d/dt(rxprobe_t) <- ", name, "*rxprobe_s")
+  tryCatch({
+    utils::capture.output(suppressMessages(suppressWarnings(
+      rxode2::rxModelVars(txt))))
+    TRUE
+  }, error = function(e) FALSE)
+}
+
+# Named character vector OLD -> NEW (upper-case) for every assigned name rxode2
+# rejects. `T` and `TIME` are NONMEM's own names for time and are handled by
+# nonmem2rx, so they are never renamed.
+.nm_reserved_renames <- function(ctl_file) {
+  if (!is.character(ctl_file) || length(ctl_file) != 1L || !file.exists(ctl_file))
+    return(character())
+  lines <- tryCatch(readLines(ctl_file, warn = FALSE), error = function(e) character())
+  nms   <- setdiff(.nm_assigned_names(lines), c("T", "TIME"))
+  if (length(nms) == 0L) return(character())
+  bad <- nms[vapply(nms, function(n) identical(.rx_accepts_name(n), FALSE), NA)]
+  if (length(bad) == 0L) return(character())
+  taken <- unique(toupper(unlist(regmatches(
+    lines, gregexpr("[A-Za-z_][A-Za-z0-9_]*", sub(";.*$", "", lines))))))
+  new <- character()
+  for (b in bad) {
+    cand <- paste0(b, "_VAR")
+    while (cand %in% c(taken, new)) cand <- paste0(cand, "X")
+    new <- c(new, cand)
+  }
+  stats::setNames(new, bad)
+}
+
+# Rename whole-word identifiers in the code records only, outside comments;
+# every other byte of the stream is left as it was.
+.nm_rename_identifiers <- function(lines, renames) {
+  if (length(renames) == 0L) return(lines)
+  code <- .nm_code_lines(lines)
+  for (i in which(code)) {
+    parts <- strsplit(lines[i], ";", fixed = TRUE)[[1]]
+    if (length(parts) == 0L) next
+    body <- parts[1]
+    for (old in names(renames))
+      body <- gsub(paste0("(?<![[:alnum:]_.$])", old, "(?![[:alnum:]_])"),
+                   renames[[old]], body, perl = TRUE, ignore.case = TRUE)
+    rest <- if (grepl(";", lines[i], fixed = TRUE))
+      substring(lines[i], nchar(parts[1]) + 1L) else ""
+    lines[i] <- paste0(body, rest)
+  }
+  lines
+}
+
+# A temporary copy of `ctl_file` with `renames` applied, under the same file name.
+.nm_renamed_copy <- function(ctl_file, renames) {
+  d <- tempfile("ferxtr-rename-")
+  dir.create(d)
+  out <- file.path(d, basename(ctl_file))
+  writeLines(.nm_rename_identifiers(readLines(ctl_file, warn = FALSE), renames), out)
+  out
+}
+
+# A temporary copy of `ctl_file` with `renames` applied, under the same file name.
+.nm_renamed_copy <- function(ctl_file, renames) {
+  d <- tempfile("ferxtr-rename-")
+  dir.create(d)
+  out <- file.path(d, basename(ctl_file))
+  writeLines(.nm_rename_identifiers(readLines(ctl_file, warn = FALSE), renames), out)
+  out
+}

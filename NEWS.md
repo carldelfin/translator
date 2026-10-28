@@ -2,6 +2,15 @@
 
 ## Bug fixes
 
+* A NONMEM variable whose lower-cased name rxode2 rejects no longer stops the
+  translation (issue #47). nonmem2rx lower-cases variables, so `DF = CL/V` in a
+  `$DES` or `$PK` reached rxode2 as `df <- cl/v` and failed with an rxode2 syntax
+  error, although the name is immaterial to the model. Each name a code record
+  assigns is now probed against rxode2 itself (a parse, not a compile, so it costs
+  milliseconds; nothing is hard-coded), and a rejected name is renamed in a copy
+  of the stream (`DF` to `DF_VAR`) with an `INFO`. Comments, `$INPUT` and other
+  non-code records are left byte for byte, and `T`/`TIME` are never renamed.
+
 * NONMEM streams that nonmem2rx cannot parse are now reported as a gap, not as a
   raw upstream error (issue #47). `ADVAN9` / `ADVAN15` (`$AES`), `ADVAN10`
   (Michaelis-Menten) and a solved `ADVAN` whose `$ERROR` reads a compartment other
