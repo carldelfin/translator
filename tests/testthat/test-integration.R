@@ -38,6 +38,15 @@ test_that("ODE F1/ALAG1: emitted as dose-attribute parameters, snapshot", {
   expect_no_match(result$ferx_text, "theta ALAG1\\(")
 })
 
+test_that("ODE F1 read in [odes]: read through a copy, snapshot", {
+  skip_if_not_installed("nonmem2rx")
+  result <- suppressWarnings(nm_to_ferx(nm_path("ode_dose_attr_read.ctl")))
+  expect_snapshot(cat(norm_snap(result$ferx_text)))
+  expect_false(grepl("RXF", result$ferx_text))
+  expect_match(result$ferx_text, "F1_VAL = F1", fixed = TRUE)
+  expect_match(result$ferx_text, "QQ = F1 * 2", fixed = TRUE)
+})
+
 test_that("analytical F1/ALAG1: bound by role in the pk macro, snapshot", {
   skip_if_not_installed("nonmem2rx")
   result <- suppressWarnings(nm_to_ferx(nm_path("adv2_dose_attr.ctl")))

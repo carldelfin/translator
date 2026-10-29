@@ -794,3 +794,23 @@ for (.m in c("ode_dose_attr.ctl", "adv2_dose_attr.ctl")) local({
     expect_gt(max(abs(base - lag_off)), 0.01)
   })
 })
+
+# A dose attribute the model also reads: the file must validate (the engine
+# rejects a bound name read in [odes]) and the read must reach the ODE. Each
+# mutation below changes only what is read, so it can tell "read the value" from
+# "read nothing" -- F1 = 0.6 means a stray 1 is a different number.
+test_that("a dose attribute read in the ODE validates and reaches the ODE", {
+  txt <- .eval_only(suppressWarnings(
+    nm_to_ferx(system.file("testmodels/nonmem/ode_dose_attr_read.ctl",
+                           package = "ferxtranslate")))$ferx_text)
+  v <- ferx_model_validate(.write_tmp(txt), data = .dose_attr_data())
+  expect_true(isTRUE(v$ok))
+
+  base <- .pred_of(txt, .dose_attr_data())$pred
+  copy_one <- sub("F1_VAL = F1", "F1_VAL = 1", txt, fixed = TRUE)
+  expect_false(identical(copy_one, txt))
+  expect_gt(max(abs(base - .pred_of(copy_one, .dose_attr_data())$pred)), 0.01)
+  qq_one <- sub("QQ = F1 * 2", "QQ = 2", txt, fixed = TRUE)
+  expect_false(identical(qq_one, txt))
+  expect_gt(max(abs(base - .pred_of(qq_one, .dose_attr_data())$pred)), 0.01)
+})

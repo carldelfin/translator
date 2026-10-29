@@ -1323,6 +1323,15 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
   expr_out$indiv_params <- da$indiv_params
   structural            <- da$structural
   warn                  <- c(warn, da$warnings)
+  rt <- .route_dose_attr_reads(
+    da$map, expr_out$indiv_params, expr_out$odes, init_conds, scaling,
+    taken = c(vapply(theta_out$thetas, function(t) t$name, ""),
+              .ode_states(expr_out$odes), reserved_base, .RESERVED_ODE_NAMES))
+  expr_out$indiv_params <- rt$indiv_params
+  expr_out$odes         <- rt$odes
+  init_conds            <- rt$init_conds
+  scaling               <- rt$scaling
+  warn                  <- c(warn, rt$warnings)
 
   # Drop $ERROR scaffolding from [individual_parameters] (issue #6 defect 6).
   #
@@ -2515,24 +2524,108 @@ bound_name <- function(entries, raw) {
       "."))
   }
 
+  # Reads of an alias are rewritten here as well as its declaration: nonmem2rx
+  # replaces every later read of `F1` in the source with the alias, so leaving
+  # them would emit the nonmem2rx temporary into the file as an undefined name.
+  # Inside [individual_parameters] the final name is a valid thing to read.
   walk <- function(sts) {
     res <- list()
     for (p in sts) {
       if (identical(.stmt_kind(p, "assign"), "if")) {
+        p$cond <- .rewrite_syms(p$cond, map)
         p$then <- walk(p$then)
         if (length(p$else_) > 0) p$else_ <- walk(p$else_)
         if (length(p$then) == 0L && length(p$else_) == 0L) next
       } else if (toupper(p$lhs) %in% drop) {
         next
-      } else if (!is.null(map[[toupper(p$lhs)]])) {
-        p$lhs <- map[[toupper(p$lhs)]]
+      } else {
+        if (!is.null(map[[toupper(p$lhs)]])) p$lhs <- map[[toupper(p$lhs)]]
+        p$rhs <- .rewrite_syms(p$rhs, map)
       }
       res <- c(res, list(p))
     }
     res
   }
   list(indiv_params = walk(indiv_params), structural = structural,
-       warnings = warn)
+       warnings = warn, map = map)
+}
+
+# Reads of a dose attribute from anywhere but [individual_parameters].
+#
+# ferx rejects a model that both binds a name as a dose attribute and reads it
+# (`E_DOSE_ATTR_DOUBLE_USE`, measured on [odes] and [scaling]), while reading it
+# from another individual parameter is fine. NONMEM allows both, and the value
+# is the same, so each such read goes through a second individual parameter
+# declared as a plain copy: `F1_VAL = F1`, placed after the last statement that
+# defines F1 so a conditional override is included. Returns the rewritten blocks
+# and the copies made.
+.route_dose_attr_reads <- function(map, indiv_params, odes, init_conds, scaling,
+                                   taken) {
+  out <- list(indiv_params = indiv_params, odes = odes, init_conds = init_conds,
+              scaling = scaling, warnings = character())
+  if (length(map) == 0L) return(out)
+
+  sym_in <- function(txt) {
+    e <- if (is.character(txt) && length(txt) == 1L && !is.na(txt))
+           tryCatch(str2lang(txt), error = function(e) NULL) else NULL
+    if (is.null(e)) character() else toupper(all.names(e))
+  }
+  stmt_syms <- function(sts) {
+    unlist(lapply(sts, function(o) {
+      if (identical(.stmt_kind(o, "ddt"), "if"))
+        c(sym_in(o$cond), stmt_syms(o$then), stmt_syms(o$else_))
+      else sym_in(o$rhs)
+    }))
+  }
+  read <- unique(c(stmt_syms(odes),
+                   unlist(lapply(init_conds, function(x) sym_in(x$rhs))),
+                   if (is.character(scaling$obs_scale)) sym_in(scaling$obs_scale)))
+  need <- intersect(names(map), read)
+  if (length(need) == 0L) return(out)
+
+  copy <- list()
+  used <- toupper(c(taken, .ip_names(indiv_params)))
+  for (alias in need) {
+    nm <- paste0(map[[alias]], "_VAL")
+    while (toupper(nm) %in% used) nm <- paste0(nm, "_")
+    used <- c(used, toupper(nm))
+    copy[[alias]] <- nm
+  }
+
+  defines <- function(p, alias_final) {
+    if (identical(.stmt_kind(p, "assign"), "if"))
+      any(vapply(c(p$then, p$else_), defines, NA, alias_final))
+    else identical(p$lhs, alias_final)
+  }
+  ip <- indiv_params
+  for (alias in need) {
+    last <- 0L
+    for (i in seq_along(ip)) if (defines(ip[[i]], map[[alias]])) last <- i
+    stmt <- list(kind = "assign", lhs = copy[[alias]], rhs = map[[alias]])
+    ip <- append(ip, list(stmt), after = last)
+  }
+  out$indiv_params <- ip
+
+  rw <- function(sts) lapply(sts, function(o) {
+    if (identical(.stmt_kind(o, "ddt"), "if")) {
+      o$cond <- .rewrite_syms(o$cond, copy)
+      o$then <- rw(o$then)
+      if (length(o$else_) > 0) o$else_ <- rw(o$else_)
+    } else o$rhs <- .rewrite_syms(o$rhs, copy)
+    o
+  })
+  out$odes <- rw(odes)
+  out$init_conds <- lapply(init_conds, function(x) {
+    x$rhs <- .rewrite_syms(x$rhs, copy); x
+  })
+  if (is.character(scaling$obs_scale))
+    out$scaling$obs_scale <- .rewrite_syms(scaling$obs_scale, copy)
+  out$warnings <- vapply(need, function(a) paste0(
+    "INFO  | '", map[[a]], "' is also read outside [individual_parameters], ",
+    "which ferx rejects for a name it applies as a dose attribute ",
+    "(E_DOSE_ATTR_DOUBLE_USE); those reads use the copy '", copy[[a]],
+    "' instead."), "")
+  out
 }
 
 # Rewrite an emitted expression STRING through a rename map, via the parse tree

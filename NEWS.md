@@ -21,6 +21,15 @@
   `F1 = 1` with the dose scaled by 0.6 to the last digit, so F is applied exactly
   once, on both engines.
 
+* A dose attribute that the model also reads (`QQ = F1*2`, or `F1` inside
+  `$DES`) no longer emits the nonmem2rx internal name `RXF_RXDDTA1_` as an
+  undefined identifier (issue #71). Reads inside `[individual_parameters]` use
+  the attribute directly. Reads in `[odes]` or `init()` go through a plain copy
+  (`F1_VAL = F1`) declared after the last statement that defines `F1`, because
+  ferx rejects a bound dose attribute that is also read there
+  (`E_DOSE_ATTR_DOUBLE_USE`). An `INFO` warning names the copy. `S<n> = V/F1`
+  is not covered here.
+
 * `FIX` on a `$OMEGA`, `$SIGMA` or IOV variance is no longer dropped
   (issue #31). A source that pinned a parameter -- an IIV held at a literature
   value, a residual held at a known assay CV -- translated into one that

@@ -2105,6 +2105,81 @@ test_that("a conditional override of a dose attribute is kept as an if", {
   expect_false(grepl("RXF", txt))
 })
 
+# -- dose attributes that the model also READS (issue #71) --------------------
+#
+# nonmem2rx rewrites every later read of `F1` to the alias, so the alias must be
+# routed: to the final name inside [individual_parameters], where ferx allows a
+# read, and through a plain copy anywhere else, where ferx raises
+# E_DOSE_ATTR_DOUBLE_USE.
+
+.read_ir <- function(extra, ode = quote(d/dt(depot) <- -cl * depot * rxf.rxddta1.)) {
+  ini <- rbind(theta_row("t.TCL", 1), theta_row("t.T4", 0.7), eta_row("eta1", 0.09, 1L))
+  lst <- c(list(quote(cl <- t.TCL * exp(eta1)),
+                quote(rxf.rxddta1. <- t.T4),
+                quote(f(depot) <- rxf.rxddta1.)),
+           extra, list(ode))
+  suppressWarnings(rxui_to_ir(list(iniDf = ini, lstExpr = lst),
+                              source_format = "nonmem"))
+}
+
+test_that("a dose attribute read in [odes] goes through a copy", {
+  ir  <- .read_ir(list())
+  txt <- emit_ferx(ir)
+  expect_false(grepl("RXF", txt))
+  expect_match(txt, "F1 = ", fixed = TRUE)
+  expect_match(txt, "F1_VAL = F1", fixed = TRUE)
+  expect_match(txt, "d/dt(depot) = -CL * depot * F1_VAL", fixed = TRUE)
+  expect_true(any(grepl("F1_VAL", ir$warnings, fixed = TRUE)))
+  # The copy follows the definition: ferx rejects a read before it (E_PARSE).
+  expect_lt(regexpr("F1 = ", txt, fixed = TRUE), regexpr("F1_VAL = F1", txt, fixed = TRUE))
+})
+
+test_that("a dose attribute read only by another individual parameter needs no copy", {
+  ir  <- .read_ir(list(quote(qq <- rxf.rxddta1. * 2)),
+                  ode = quote(d/dt(depot) <- -cl * depot * qq))
+  txt <- emit_ferx(ir)
+  expect_match(txt, "QQ = F1 * 2", fixed = TRUE)
+  expect_false(grepl("_VAL", txt))
+  expect_false(grepl("RXF", txt))
+})
+
+test_that("the copy of a conditionally overridden dose attribute follows the if", {
+  ini <- rbind(theta_row("t.TCL", 1), theta_row("t.T4", 0.7), eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(cl <- t.TCL * exp(eta1)),
+              quote(rxf.rxddta1. <- 1),
+              quote(f(depot) <- rxf.rxddta1.),
+              quote(if (FORM == 2) { rxf.rxddta1. <- t.T4; f(depot) <- rxf.rxddta1. }),
+              quote(d/dt(depot) <- -cl * depot * rxf.rxddta1.))
+  ir  <- suppressWarnings(rxui_to_ir(list(iniDf = ini, lstExpr = lst),
+                                     source_format = "nonmem"))
+  txt <- emit_ferx(ir)
+  expect_lt(regexpr("if (FORM == 2)", txt, fixed = TRUE),
+            regexpr("F1_VAL = F1", txt, fixed = TRUE))
+  expect_false(grepl("RXF", txt))
+})
+
+test_that("a copy never takes a name the model already uses", {
+  ir  <- .read_ir(list(quote(f1_val <- 3 * cl)))
+  txt <- emit_ferx(ir)
+  expect_match(txt, "F1_VAL_ = F1", fixed = TRUE)
+  expect_match(txt, "d/dt(depot) = -CL * depot * F1_VAL_", fixed = TRUE)
+})
+
+test_that(".route_dose_attr_reads reroutes init() and obs_scale reads", {
+  r <- .route_dose_attr_reads(
+    map          = list(RXF_RXDDTA1_ = "F1"),
+    indiv_params = list(list(kind = "assign", lhs = "F1", rhs = "THETA4"),
+                        list(kind = "assign", lhs = "V",  rhs = "THETA3")),
+    odes         = list(list(kind = "ddt", state = "A", rhs = "-K * A")),
+    init_conds   = list(list(kind = "init", state = "A", rhs = "100 * RXF_RXDDTA1_")),
+    scaling      = list(obs_scale = "V / RXF_RXDDTA1_"),
+    taken        = character())
+  expect_equal(r$init_conds[[1]]$rhs, "100 * F1_VAL")
+  expect_equal(r$scaling$obs_scale, "V/F1_VAL")
+  expect_equal(vapply(r$indiv_params, function(p) p$lhs, ""),
+               c("F1", "F1_VAL", "V"))
+})
+
 test_that("an alias shared by two dose attributes is reported, not guessed", {
   ini <- rbind(theta_row("t.TCL", 1), eta_row("eta1", 0.09, 1L))
   lst <- list(quote(cl <- t.TCL * exp(eta1)),
