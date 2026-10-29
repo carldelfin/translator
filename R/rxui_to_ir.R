@@ -30,6 +30,13 @@
 #'   dataset could not be read and reports nothing. `FALSE` together with
 #'   `has_cmt_col = TRUE` is the combination where NONMEM reads a CMT item that
 #'   ferx never finds, so ferx doses compartment 1 whatever the item holds.
+#' @param default_dose_rows Integer vector of the dataset rows (1-based, header
+#'   excluded) that are dose records whose `CMT` cell is `0`, `.` or empty, as
+#'   returned by `.nm_data_default_dose_rows()`; `integer(0)` when the dataset
+#'   was read and has none, `NULL` (the default) when it could not be read.
+#'   NONMEM sends such a dose to the `$MODEL` DEFDOSE compartment and ferx to
+#'   compartment 1, so a non-empty vector with a DEFDOSE compartment that is not
+#'   the one ferx puts first is reported.
 #'
 #' @return A `ferx_ir` object.
 #'
@@ -50,7 +57,8 @@
 #' @export
 rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_character_,
                        scaling_hint = list(), obs_hint = NULL,
-                       has_cmt_col = NA, cmt_header = NA) {
+                       has_cmt_col = NA, cmt_header = NA,
+                       default_dose_rows = NULL) {
   ini  <- ui$iniDf
   lst  <- ui$lstExpr
   warn <- character()
@@ -778,7 +786,7 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
     #
     # This is a $INPUT-level test and does not close the whole divergence. Two
     # narrower routes reach the same mismatch and neither is visible from the
-    # control stream alone:
+    # control stream alone (both are handled below, when the dataset is readable):
     #
     #   - A dose ROW whose CMT cell is `0` or `.`. NM-TRAN sends it to DEFDOSE,
     #     while ferx-core reads the cell as None (`.`/empty, datareader.rs) or
@@ -789,8 +797,9 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
     #     never reads $INPUT. So `has_cmt_col` is TRUE, this stays quiet, and
     #     ferx still falls to compartment 1. Tracked as #36.
     #
-    # Both need the dataset, which this function does not read and often cannot
-    # -- the .ctl's $DATA frequently names a file that is not there. So the
+    # Both need the dataset, which this function does not read itself (to_ferx()
+    # passes in what it found) and often cannot -- the .ctl's $DATA frequently
+    # names a file that is not there, and then both stay silent. So the
     # remedy below states what the dataset must contain (a header named CMT,
     # carrying the compartment number on every dose row) rather than claiming
     # to have checked it, and the guard is not read as complete.
@@ -842,6 +851,44 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
       structural$note <- paste0(
         "WARNING: doses land in '", ferx_cmt, "' here; NONMEM dosed '", dd_name,
         "' (compartment ", dd, ", $MODEL DEFDOSE, no CMT item on $INPUT)")
+    }
+
+    # And the per-row half of #27 (#35). With a CMT column present the data
+    # decides, which is right for every dose row that names a compartment and
+    # wrong for one whose cell is `0`, `.` or empty: NM-TRAN sends it to DEFDOSE
+    # and ferx to compartment 1. That is a property of the data, so it is only
+    # reported when the dataset was read (`default_dose_rows` non-NULL); an
+    # unreadable dataset stays silent rather than guessing. Skipped when the
+    # CMT column is absent (#27 above) or not bound by header (#36 below), which
+    # are different findings about the same dose.
+    ddr <- default_dose_rows
+    if (!isFALSE(has_cmt_col) && !isFALSE(cmt_header) && is.numeric(dd) &&
+        length(dd) == 1L && !is.na(dd) && length(structural$states) > 0L &&
+        dd >= 1L && dd <= length(obs_hint$comps) &&
+        is.numeric(ddr) && length(ddr) > 0L) {
+      dd_nm <- obs_hint$comps[[as.integer(dd)]]
+      fx    <- structural$states[[1L]]
+      if (!.same_cmt_name(fx, dd_nm)) {
+        shown <- paste(utils::head(ddr, 3L), collapse = ", ")
+        more  <- if (length(ddr) > 3L) ", ..." else ""
+        warn <- c(warn, paste0(
+          "ERROR | ", length(ddr), " dose row(s) in the dataset (data row ", shown,
+          more, ") carry CMT 0, '.' or empty. NONMEM doses those into the ",
+          "$MODEL DEFDOSE compartment ", dd, " ('", dd_nm, "'); ferx has no ",
+          "model-side dose-compartment binding on the fitting path and doses ",
+          "compartment 1 ('", fx, "'). Give those rows the compartment number ",
+          dd, " explicitly in the CMT column; otherwise the doses land in the ",
+          "wrong compartment silently."))
+        unsp <- c(unsp, paste0(
+          "no model-side dose compartment (ferx-core#1009) -- ", length(ddr),
+          " dose row(s) have CMT 0/./empty, which NONMEM doses into DEFDOSE ",
+          "compartment ", dd, " ('", dd_nm, "') and ferx into compartment 1 ('",
+          fx, "')"))
+        structural$note <- paste0(
+          "WARNING: doses land in '", fx, "' for ", length(ddr), " dose row(s) ",
+          "with CMT 0/./empty; NONMEM dosed '", dd_nm, "' (compartment ", dd,
+          ", $MODEL DEFDOSE)")
+      }
     }
 
     # The other half of the same routing question, from the dataset side (#36).

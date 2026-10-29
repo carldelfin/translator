@@ -68,6 +68,41 @@
   any(toupper(cols) == "CMT")
 }
 
+# The data rows (1-based, header excluded) of dose records whose CMT cell NONMEM
+# routes to $MODEL's DEFDOSE compartment but ferx routes to compartment 1.
+#
+# NM-TRAN sends a dose with CMT `0`, `.` or an empty cell to DEFDOSE. ferx reads
+# `.` and empty as no value and `0` as its own CMT=0 convention, and both land on
+# compartment 1 (datareader.rs; types.rs `cmt_idx`). Returns integer(0) when the
+# dataset was read and has no such row, and NULL when it could not be settled
+# (no readable file, no header naming AMT and CMT) -- callers stay silent on NULL.
+#
+# A dose row is EVID 1 or 4 when the header has EVID, otherwise AMT > 0. Only the
+# AMT, CMT and EVID columns are read.
+.nm_data_default_dose_rows <- function(ctl_file) {
+  cols <- .nm_data_header(ctl_file)
+  if (is.null(cols)) return(NULL)
+  up <- toupper(cols)
+  i_cmt <- match("CMT", up)
+  i_amt <- match("AMT", up)
+  i_evid <- match("EVID", up)
+  if (is.na(i_cmt) || is.na(i_amt)) return(NULL)
+  keep <- rep("NULL", length(cols))
+  keep[c(i_cmt, i_amt, i_evid[!is.na(i_evid)])] <- "character"
+  dat <- tryCatch(
+    utils::read.csv(.extract_nm_data_path(ctl_file), colClasses = keep,
+                    strip.white = TRUE, na.strings = character(),
+                    check.names = FALSE, comment.char = ""),
+    error = function(e) NULL)
+  if (is.null(dat) || nrow(dat) == 0L) return(NULL)
+  num <- function(x) suppressWarnings(as.numeric(x))
+  dose <- if (!is.na(i_evid)) num(dat[[cols[i_evid]]]) %in% c(1, 4)
+          else num(dat[[cols[i_amt]]]) > 0
+  cmt <- trimws(dat[[cols[i_cmt]]])
+  routed <- !nzchar(cmt) | cmt == "." | (!is.na(num(cmt)) & num(cmt) == 0)
+  which(dose & !is.na(dose) & routed)
+}
+
 .is_abs_path <- function(p) grepl("^(/|~|[A-Za-z]:[\\\\/])", p)
 
 # Parse NONMEM $PK block for Sn = varname compartment scaling assignments.

@@ -1334,3 +1334,25 @@ test_that("an absent dataset leaves the CMT-header check silent", {
                                    validate = FALSE))
   expect_length(grep("CMT column not bound", r$unsupported), 0L)
 })
+
+test_that("a CMT-0 dose row on a DEFDOSE-elsewhere model is reported, its twin is not", {
+  skip_if_not_installed("nonmem2rx")
+  # cmt_zero_dose.ctl and cmt_explicit_dose.ctl share the control stream; the
+  # CSVs differ in one cell, the CMT of the first dose row (0 vs 2). The column
+  # is present and bound in both, so the #27 and #36 guards are silent in both.
+  bad  <- suppressWarnings(nm_to_ferx(nm_path("cmt_zero_dose.ctl"), validate = FALSE))
+  good <- suppressWarnings(nm_to_ferx(nm_path("cmt_explicit_dose.ctl"), validate = FALSE))
+
+  expect_length(grep("^ERROR.*1 dose row", bad$warnings), 1L)
+  expect_length(grep("CMT 0/./empty", bad$unsupported), 1L)
+  expect_match(bad$unsupported, "CENTRAL", all = FALSE)
+  expect_match(bad$unsupported, "PERIPH",  all = FALSE)
+  ln  <- strsplit(bad$ferx_text, "\n")[[1]]
+  hdr <- which(ln == "[structural_model]")
+  expect_length(hdr, 1L)
+  expect_match(ln[hdr + 1L], "^  # WARNING: doses land in 'PERIPH' for 1 dose row")
+  expect_equal(ln[hdr + 2L], "  ode(obs_cmt=CENTRAL, states=[PERIPH, CENTRAL])")
+
+  expect_length(good$unsupported, 0L)
+  expect_length(grep("# WARNING: doses land", good$ferx_text), 0L)
+})
